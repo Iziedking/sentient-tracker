@@ -1,29 +1,27 @@
 from telegram import Bot
-from telegram.ext import Updater, CommandHandler
+from telegram.ext import Application, CommandHandler
 import os
 import datetime
 import asyncio
 from twitter_handler import get_twitter_client
 from discord_handler import bot as discord_bot
-from database import add_metric, get_last_metric, add_user, get_users  # Added get_users
+from database import add_metric, get_last_metric, add_user, get_users
 from utils import matches_keywords, KEYWORDS
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-bot = Bot(TELEGRAM_TOKEN)
-updater = Updater(TELEGRAM_TOKEN, use_context=True)
-dispatcher = updater.dispatcher
 
+
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 def subscribe(update, context):
     telegram_id = update.message.chat_id
     add_user(context.bot_data['cursor'], context.bot_data['conn'], telegram_id)
     update.message.reply_text('Subscribed to Sentient event reminders!')
 
-dispatcher.add_handler(CommandHandler('subscribe', subscribe))
-
+application.add_handler(CommandHandler('subscribe', subscribe))
 
 def connect_calendar(update, context):
     if len(context.args) == 1:
@@ -34,11 +32,10 @@ def connect_calendar(update, context):
     else:
         update.message.reply_text('Usage: /connect_calendar your_calendar_id@group.calendar.google.com')
 
-dispatcher.add_handler(CommandHandler('connect_calendar', connect_calendar))
-
+application.add_handler(CommandHandler('connect_calendar', connect_calendar))
 
 def send_notification(telegram_id, message):
-    bot.send_message(chat_id=telegram_id, text=message)
+    application.bot.send_message(chat_id=telegram_id, text=message)
 
 def check_x(update, context):
     if len(context.args) != 1:
@@ -46,6 +43,7 @@ def check_x(update, context):
         return
     username = context.args[0].lstrip('@')
     telegram_id = update.message.chat_id
+    
     try:
         client = get_twitter_client()
         user = client.get_user(username=username)
@@ -65,9 +63,9 @@ def check_x(update, context):
     except Exception as e:
         update.message.reply_text(f"Error: {str(e)}")
 
-dispatcher.add_handler(CommandHandler('check_x', check_x))
+application.add_handler(CommandHandler('check_x', check_x))
 
-def check_discord(update, context):
+async def check_discord(update, context):  # Made async
     if len(context.args) != 1:
         update.message.reply_text('Usage: /check_discord username#discriminator or user_id')
         return
@@ -77,6 +75,7 @@ def check_discord(update, context):
     if not guild:
         update.message.reply_text('Server not found.')
         return
+    
     try:
         if '#' in user_input:
             member = guild.get_member_named(user_input)
@@ -87,9 +86,7 @@ def check_discord(update, context):
             return
         count = 0
         for channel in guild.text_channels:
-
-            future = asyncio.run_coroutine_threadsafe(channel.history(limit=100), discord_bot.loop)
-            history = future.result()
+            history = await channel.history(limit=100).flatten()  # Await async history and flatten to list
             for msg in history:
                 if msg.author.id == member.id:
                     count += 1
@@ -98,11 +95,11 @@ def check_discord(update, context):
         growth = ((count - last_count) / last_count * 100) if last_count > 0 else 0
         add_metric(context.bot_data['cursor'], context.bot_data['conn'], telegram_id, 'Discord', str(member.id), now, 0, count)
         report = f"{member.name} Discord Message Report:\n- Recent Count: {count}\n- Growth: {growth:.2f}%"
-        update.message.reply_text(report)
+        await update.message.reply_text(report)  # Await reply
     except Exception as e:
-        update.message.reply_text(f"Error: {str(e)}")
+        await update.message.reply_text(f"Error: {str(e)}")  # Await
 
-dispatcher.add_handler(CommandHandler('check_discord', check_discord))
+application.add_handler(CommandHandler('check_discord', check_discord))
 
 def notify_users(event, cursor, add_to_calendar_func):
     for telegram_id, calendar_id in get_users(cursor):
